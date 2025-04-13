@@ -36,12 +36,16 @@ export class Store {
         if (instance._error !== undefined) {
             throw instance._error; // Propagate error
         }
-        if (instance._promise !== undefined) {
-            // For sync get, throw the promise (Suspense integration)
-            // Or handle differently based on environment (e.g., return undefined in Node)
-            // For now, we'll throw to align with potential Suspense usage
+        // If state is valid, return the value even if the promise hasn't been cleared yet by microtask
+        if (instance._state === 'valid' && instance._value !== undefined) {
+             return instance._value as T;
+        }
+        // If state is pending and promise exists, throw promise for Suspense
+        if (instance._state === 'pending' && instance._promise !== undefined) {
             throw instance._promise;
         }
+        // If state is valid but value is undefined (shouldn't happen?), or other states...
+        // Let the later checks handle it or throw error.
         if (instance._value !== undefined) {
             // Ensure value is not undefined before returning, although prior checks should handle this.
             // Cast to T as the logic guarantees it's the correct type if defined.
@@ -186,12 +190,14 @@ export class Store {
                             const result = await actionFn(currentState, ...args);
                             // If action returns a new state, update the atom
                             // Check for undefined explicitly, allow null/false/0 as valid states
-                            if (result !== undefined && result !== currentState) {
+                            // Update state if the action returned anything other than undefined.
+                            // internalSetState handles the actual value comparison.
+                            if (result !== undefined) {
                                 // Use internal set to bypass writability checks
                                 // Use internal set AND explicitly propagate changes
                                 this.internalSetState(instance, result);
                                 // Ensure propagation happens after state update from action
-                                this.propagateChanges(instance);
+                                // Propagation is now handled within internalSetState
                             }
                             // Return the result, which could be a Promise or a direct value
                             return result;
@@ -213,15 +219,18 @@ export class Store {
 
     private internalSetState<T>(instance: Atom<T>, newState: T): void {
         const oldValue = instance._value;
+        // console.log(`[internalSetState ${String(instance._id)}] Old:`, JSON.stringify(oldValue), 'New:', JSON.stringify(newState), 'Compare:', oldValue !== newState); // REMOVE LOGGING
         if (oldValue !== newState) {
             instance._value = newState;
             instance._promise = undefined; // Clear async state on direct update
             instance._error = undefined;
             instance._state = 'valid'; // Ensure state is marked as valid
+            // console.log(`[internalSetState ${String(instance._id)}] State updated. Notifying ${instance._subscribers?.size ?? 0} subscribers.`); // REMOVE LOGGING
             this.notifySubscribers(instance);
-            // propagateChanges is already called in the 'use' method after this now
-            // this.propagateChanges(instance); // Avoid double propagation
-        }
+            // Removed propagateChanges from here; it should happen naturally via updateAtomState or direct set
+        } // else {
+             // console.log(`[internalSetState ${String(instance._id)}] State NOT updated (values equal).`); // REMOVE LOGGING
+        // }
     }
 
     /** Resolves a regular atom instance, ensuring it's not a family template */
@@ -416,6 +425,7 @@ export class Store {
                     const controller = new AbortController();
                     instance._streamController = controller;
                     instance._state = 'pending'; // Mark as pending while stream emits
+                    this.notifySubscribers(instance); // Notify immediately about pending state
 
                     // IIAFE to handle the async iteration
                     (async () => {
@@ -464,6 +474,7 @@ export class Store {
                     const controller = new AbortController();
                     instance._streamController = controller;
                     instance._state = 'pending'; // Mark as pending while observable emits
+                    this.notifySubscribers(instance); // Notify immediately about pending state
 
                     // Assume a simple Observable-like structure with subscribe returning an unsubscribe function or object
                     const subscription = (result as any).subscribe({

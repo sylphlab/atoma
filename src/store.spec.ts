@@ -316,11 +316,11 @@ describe('Store', () => {
     const unsubA2 = store.on(dataAInstance, listenerA2);
     const unsubB = store.on(dataBInstance, listenerB);
 
-    expect(storeInternal.atomCache.get(atomInstanceAId)?.subs.size).toBe(2);
-    expect(storeInternal.atomCache.get(atomInstanceBId)?.subs.size).toBe(1);
+    expect(storeInternal.atomCache.get(atomInstanceAId)?._subscribers.size).toBe(2);
+    expect(storeInternal.atomCache.get(atomInstanceBId)?._subscribers.size).toBe(1);
 
     unsubA1();
-    expect(storeInternal.atomCache.get(atomInstanceAId)?.subs.size).toBe(1);
+    expect(storeInternal.atomCache.get(atomInstanceAId)?._subscribers.size).toBe(1);
     expect(storeInternal.atomCache.has(atomInstanceAId)).toBe(true); // Still has one sub
 
     unsubB();
@@ -356,18 +356,21 @@ describe('Store', () => {
         expect(lastCallArgs[0]).toEqual({ id: 1, name: 'User 1' });
         expect(lastCallArgs[1]).toBeUndefined();
     });
+    await tick(); // Ensure microtasks complete before final get
      await vi.waitFor(() => {
         expect(listener2).toHaveBeenCalled();
         const lastCallArgs = listener2.mock.calls[listener2.mock.calls.length - 1];
         expect(lastCallArgs[0]).toEqual({ id: 2, name: 'User 2' });
         expect(lastCallArgs[1]).toBeUndefined();
     });
+    await tick(); // Ensure microtasks complete before final get
      await vi.waitFor(() => {
         expect(listenerInvalid).toHaveBeenCalled();
         const lastCallArgs = listenerInvalid.mock.calls[listenerInvalid.mock.calls.length - 1];
         expect(lastCallArgs[0]).toBeUndefined();
         expect(lastCallArgs[1]).toBeInstanceOf(Error);
     });
+    await tick(); // Ensure microtasks complete before final get
 
 
     // Check resolved values after waiting for listeners
@@ -438,7 +441,7 @@ describe('Store', () => {
     expect(store.get(counterModel)).toEqual({ count: 0 });
   });
 
-  it('should update state using actions from a model-like atom', () => {
+  it('should update state using actions from a model-like atom', async () => { // Make test async
     const counterModel = atom({
       build: () => ({ count: 0 }),
       actions: {
@@ -451,10 +454,10 @@ describe('Store', () => {
 
     expect(store.get(counterModel)).toEqual({ count: 0 });
 
-    actions.inc();
+    await actions.inc(); // Await the action
     expect(store.get(counterModel)).toEqual({ count: 1 });
 
-    actions.add(5);
+    await actions.add(5); // Await the action
     expect(store.get(counterModel)).toEqual({ count: 6 });
   });
 
@@ -518,7 +521,7 @@ describe('Store', () => {
 
   });
 
-   it('should subscribe to state changes triggered by model actions', () => {
+   it('should subscribe to state changes triggered by model actions', async () => { // Make test async
     const counterModel = atom({
       build: () => ({ count: 0 }),
       actions: {
@@ -532,16 +535,16 @@ describe('Store', () => {
     expect(listener).toHaveBeenCalledTimes(1); // Initial build
     expect(listener).toHaveBeenCalledWith({ count: 0 }, undefined);
 
-    actions.inc();
+    await actions.inc(); // Await the action
     expect(listener).toHaveBeenCalledTimes(2); // After action
     expect(listener).toHaveBeenLastCalledWith({ count: 1 }, undefined);
 
-    actions.inc();
+    await actions.inc(); // Await the action
     expect(listener).toHaveBeenCalledTimes(3); // After second action
     expect(listener).toHaveBeenLastCalledWith({ count: 2 }, undefined);
 
     unsubscribe();
-    actions.inc();
+    await actions.inc(); // Await the action
     expect(listener).toHaveBeenCalledTimes(3); // Unsubscribed
   });
 
@@ -811,6 +814,12 @@ async function* mockAsyncIterable<T>(values: T[], delay = 1, errorAfter?: number
     expect(errorCallArgs[1]).toBeInstanceOf(Error);
     expect((errorCallArgs[1] as Error).message).toBe('AsyncIterable failed after 2 items');
 
+    // Wait for listener to be called with error before checking store.get
+    await vi.waitFor(() => {
+        const lastCall = listener.mock.calls[listener.mock.calls.length - 1];
+        expect(lastCall[1]).toBeInstanceOf(Error);
+        expect((lastCall[1] as Error).message).toBe('AsyncIterable failed after 2 items');
+    });
     // Check store.get throws the error
     expect(() => store.get(streamAtom)).toThrow('AsyncIterable failed after 2 items');
   });
