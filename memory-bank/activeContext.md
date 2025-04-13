@@ -1,38 +1,25 @@
 # Active Context
 
-**Current Focus**: Debugging JavaScript heap out of memory error during unit tests.
+**Current Focus**: Implementing Refined Error Propagation in `Store`.
 
 **Summary of Recent Actions**:
-- **Refactored Atom Families & Fixed Initial Tests**:
-    - Introduced explicit `atomFamily()` function.
-    - Removed implicit family detection from `atom()`.
-    - Updated types (`AtomFamilyTemplate`, guards).
-    - Updated `Store` logic (`resolveAtomInstance`, `resolveFamilyInstance`, `buildAtom` argument passing).
-    - Updated exports.
-    - Fixed all resulting TypeScript errors.
-    - Modified `store.spec.ts` to expect initial notification on subscription.
-    - Successfully ran initial 8 tests.
+- **Fixed Heap Overflow**: Identified and fixed a recursive loop in `store.ts`'s `propagateChanges` function. The function was immediately rebuilding subscribed dependents after invalidation, leading to potential infinite loops. Changed the logic to only invalidate, relying on lazy evaluation (rebuild on next `get`).
+- **Ran `npm test`**: Tests now pass successfully after the fix.
+- **Added `.gitignore`**: Created a standard `.gitignore` file for Node.js/TypeScript projects.
+
+**Previous Context (Pre-Fix)**:
+- Refactored Atom Families & Fixed Initial Tests.
 - Renamed project references to `@atoma/core`.
-- Implemented refined teardown logic (`maybeTeardownAtom` with cache removal).
-- Implemented basic support for Writable Computed Atoms (`WritableComputedAtomDefinition`, updated `store.set`, updated `buildAtom`).
-- Implemented Refined Dirty Checking:
-    - Added `AtomState` type (`idle`, `building`, `valid`, `error`, `pending`, `dirty`) to `Atom` interface.
-    - Updated `Store` methods (`resolve...Instance`, `buildAtom`, `updateAtomState`, `invalidateAtom`, `get`, `set`) to manage and utilize `_state`.
-- Added unit tests for Teardown, Writable Computed Atoms, and State Transitions in `store.spec.ts`.
-- Modified `store.on` to immediately notify new subscribers with the current atom state if available.
-- **Ran `npm test`**: Tests failed with `FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory`.
+- Implemented refined teardown logic.
+- Implemented basic support for Writable Computed Atoms.
+- Implemented Refined Dirty Checking.
+- Added unit tests for new features.
+- Modified `store.on` for immediate notification.
+- Encountered heap overflow during tests.
 
-**Current Problem**: The latest changes, particularly the immediate notification logic in `store.on`, seem to have introduced an infinite loop or memory leak, causing tests to run out of memory. This likely stems from the interaction between `on` calling the callback, which might trigger `get`, leading back to `buildAtom`, `updateAtomState`, `notifySubscribers`, and potentially `propagateChanges`, creating a cycle under certain conditions.
-
-**Next Steps (for next AI)**:
-1. **Debug Heap Overflow**: Analyze the interaction flow starting from `store.on`'s immediate notification. Specifically examine:
-    - `on` -> `callback` (immediate call)
-    - `callback` potentially calling `store.get`
-    - `store.get` potentially calling `buildAtom` (if state is 'idle' or 'dirty')
-    - `buildAtom` calling `updateAtomState`
-    - `updateAtomState` calling `notifySubscribers` and `propagateChanges`
-    - `propagateChanges` calling `invalidateAtom` (setting state to 'dirty') and potentially `buildAtom` again if subscribed.
-    Identify the recursive loop or excessive object creation causing the memory exhaustion.
-2. Fix the identified issue in `store.ts`.
-3. Rerun tests (`npm test`) to confirm the fix.
-4. Proceed with remaining tasks (error propagation, more tests) once the heap issue is resolved.
+**Next Steps**:
+1. Implement remaining `Store` logic:
+    - **Refined Error Propagation**: Improve how errors are handled and potentially stored/cleared within atoms and propagated to subscribers/dependents.
+2. Write/Fix comprehensive unit tests for all features (families, models, streams, writable computed, teardown, dirty checking/state transitions, error propagation, edge cases).
+3. Implement React hooks (optional).
+4. Documentation.

@@ -1,7 +1,6 @@
 # Progress
 
-**Current Status**: Encountered JavaScript heap out of memory error during unit tests after implementing several new features and modifying `store.on` behavior. Debugging is required.
-
+**Current Status**: Unit tests are passing after fixing the heap overflow issue. The focus is now on implementing refined error propagation. Added `.gitignore`.
 **What Works (Potentially Unstable)**:
 - Project setup with tsup and Vitest.
 - Core file structure and types (including `AtomFamilyTemplate`, `WritableComputedAtomDefinition`, `AtomState`).
@@ -15,16 +14,14 @@
 - Unit tests added for Teardown, Writable Computed Atoms, and State Transitions.
 
 **What's Left / Next Steps**:
-- **CRITICAL**: Debug and fix the JavaScript heap out of memory error occurring during `npm test`. Analyze the interaction between `store.on` (immediate notification), `buildAtom`, `updateAtomState`, `notifySubscribers`, and `propagateChanges`.
 - Implement remaining `Store` logic:
-    - **Refined Error Propagation**: Improve how errors are handled and potentially stored/cleared.
-- Write/Fix comprehensive unit tests for all features (families, models, streams, writable computed, teardown, dirty checking/state transitions, edge cases) *after* fixing the heap issue.
+    - **Refined Error Propagation**: Improve how errors are handled and potentially stored/cleared within atoms and propagated to subscribers/dependents.
+- Write/Fix comprehensive unit tests for all features (families, models, streams, writable computed, teardown, dirty checking/state transitions, error propagation, edge cases).
 - Implement React hooks (optional).
 - Documentation.
 
 **Known Issues**:
-- **Heap out of memory error during `npm test`**, likely due to an infinite loop or memory leak related to recent changes in notification/state management logic.
 - Stream/Iterable handling in `buildAtom` is basic and needs refinement/testing.
 - Teardown logic's async cancellation is still basic.
-- Error handling/propagation could be more sophisticated.
-- Comprehensive testing is incomplete and blocked by the heap issue.
+- Error handling/propagation could be more sophisticated (currently being addressed).
+- Comprehensive testing is incomplete.

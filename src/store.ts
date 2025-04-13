@@ -1,4 +1,4 @@
-import { Atom, Getter, AtomContext, AtomInitializer, AtomModelDefinition, AtomFamilyTemplate, isFamilyAtomTemplate, AtomActions } from './types.js';
+import { Atom, Getter, AtomContext, AtomInitializer, AtomModelDefinition, AtomFamilyTemplate, isFamilyAtomTemplate, AtomActions, WritableComputedAtomDefinition, Setter, AtomState } from './types.js';
 
 // Symbol for internal store reference in actions
 const STORE_REF = Symbol('storeRef');
@@ -27,10 +27,8 @@ export class Store {
             this.registerDependency(dependent, instance);
         }
 
-        // Check if atom needs building/rebuilding
-        // TODO: Add more sophisticated dirty checking later
-        if (instance._value === undefined && instance._promise === undefined && instance._error === undefined) {
-             // Never built or invalidated
+        // Check if atom needs building/rebuilding based on state
+        if (instance._state === 'idle' || instance._state === 'dirty') {
             this.buildAtom(instance);
         }
 
@@ -50,10 +48,11 @@ export class Store {
             return instance._value as T;
         }
 
-        // Should ideally not reach here if buildAtom was called, but handle static atoms
-        if (typeof instance._init !== 'function') {
+        // Handle static atoms specifically if they are still idle after potential build call
+        // (buildAtom handles setting state for function-based atoms)
+        if (instance._state === 'idle' && typeof instance._init !== 'function') {
              instance._value = instance._init as T;
-             // Static initializer value is assigned directly. Cast to T.
+             instance._state = 'valid'; // Mark static atom as valid after assigning value
              return instance._value as T;
         }
 
@@ -68,13 +67,36 @@ export class Store {
     set<T>(atom: Atom<T>, value: T | ((prev: T) => T)): void {
         const instance = this.resolveAtomInstance(atom);
 
-        if (typeof instance._init === 'object' && instance._init !== null && 'actions' in instance._init) {
+        const init = instance._init;
+
+        // Check if it's a model-like atom
+        if (typeof init === 'object' && init !== null && 'actions' in init && 'build' in init) {
             throw new Error('Cannot set model-like atom directly. Use store.use(atom).actionName().');
         }
-        if (typeof instance._init === 'function' && !('_updater' in instance._init)) { // Check if it's a computed atom without a setter
-             // TODO: Add support for writable computed atoms later
+
+        // Check if it's a writable computed atom
+        if (typeof init === 'object' && init !== null && 'get' in init && 'set' in init) {
+            const writableDef = init as WritableComputedAtomDefinition<T>;
+            const setterContext = {
+                get: <D>(dep: Atom<D>) => this.get(dep),
+                set: <D>(dep: Atom<D>, val: D | ((prev: D) => D)) => this.set(dep, val)
+            };
+            // Calculate the actual value to pass to the setter
+             const newValueToSet = typeof value === 'function'
+                ? (value as (prev: T) => T)(this.get(instance)) // Pass current value to updater fn
+                : value;
+            writableDef.set(setterContext, newValueToSet);
+            // The setter function is responsible for updating underlying atoms and triggering notifications.
+            // We don't directly modify the instance._value here for computed atoms.
+            return; // Exit after calling the setter
+        }
+
+        // Check if it's a read-only computed atom (function initializer)
+        if (typeof init === 'function') {
             throw new Error('Cannot set read-only computed atom.');
         }
+
+        // If none of the above, it must be a simple static atom
 
         const oldValue = instance._value;
         const newValue = typeof value === 'function'
@@ -83,9 +105,9 @@ export class Store {
 
         if (oldValue !== newValue) {
             instance._value = newValue;
-            // TODO: Clear async state if set directly?
-            instance._promise = undefined;
+            instance._promise = undefined; // Clear async state if set directly
             instance._error = undefined;
+            instance._state = 'valid'; // Mark as valid after direct set
             this.notifySubscribers(instance);
             this.propagateChanges(instance);
         }
@@ -104,9 +126,18 @@ export class Store {
         // The callback type matches the Set type now
         instance._subscribers.add(callback);
 
-        // Trigger initial build if it hasn't happened yet and has subscribers
-        if (instance._value === undefined && instance._promise === undefined && instance._error === undefined) {
-            this.buildAtom(instance);
+        // Trigger initial build ONLY if atom is idle (never built)
+        if (instance._state === 'idle') {
+             this.buildAtom(instance);
+             // Note: buildAtom -> updateAtomState -> notifySubscribers will call the callback
+        } else if (instance._state !== 'building' && instance._state !== 'pending') {
+             // If atom is already resolved (valid or error), notify the new subscriber immediately
+             // Avoid notifying if it's currently building or pending to prevent race conditions
+             try {
+                 callback(instance._value, instance._error);
+             } catch (err) {
+                 console.error("Error in initial subscriber notification:", err);
+             }
         }
 
         return () => {
@@ -185,6 +216,10 @@ export class Store {
         }
 
         // If not cached, it's a new regular atom. Cache and return it.
+        // Initialize state if not already set
+        if (atom._state === undefined) {
+            atom._state = 'idle';
+        }
         this.atomCache.set(atom._id, atom);
         return atom;
 
@@ -211,6 +246,7 @@ export class Store {
                 _id: instanceId,
                 // _isFamily removed
                 _lastParam: param, // Store param for potential debugging/re-evaluation
+                _familyTemplateId: familyId, // Link instance back to its template
                 // Reset instance-specific state
                 _subscribers: undefined,
                 _dependents: undefined,
@@ -220,6 +256,7 @@ export class Store {
                 _error: undefined,
                 _streamController: undefined,
                 _actionsApi: undefined,
+                _state: 'idle', // Initialize state for new family instance
             };
             instances.set(paramKey, instance);
             this.atomCache.set(instanceId, instance); // Also add to global atom cache
@@ -235,6 +272,7 @@ export class Store {
             const path = [...this.buildStack.map(a => String(a._id)), String(instance._id)].join(' -> ');
             throw new Error(`Circular dependency detected: ${path}`);
         }
+        instance._state = 'building'; // Set state before starting build
         this.currentlyBuilding.add(instance._id);
         this.buildStack.push(instance);
 
@@ -256,10 +294,13 @@ export class Store {
             let buildFn: Function | undefined;
             let isModel = false;
 
-            if (typeof init === 'object' && init !== null && 'build' in init) {
+            if (typeof init === 'object' && init !== null && 'build' in init && 'actions' in init) { // Model check
                 buildFn = init.build as Function;
                 isModel = true;
-            } else if (typeof init === 'function') {
+            } else if (typeof init === 'object' && init !== null && 'get' in init && 'set' in init) { // Writable Computed check
+                 buildFn = init.get as Function; // Use the 'get' function from the definition
+                 isModel = false; // It's not a model
+            } else if (typeof init === 'function') { // Read-only computed or other function-based
                 buildFn = init;
             }
 
@@ -290,6 +331,7 @@ export class Store {
                 if (result instanceof Promise) {
                     newPromise = result;
                     instance._promise = newPromise; // Set promise immediately
+                    instance._state = 'pending'; // Mark as pending while promise resolves
                     result
                         .then(value => {
                             // Only update if the promise is still the current one
@@ -309,6 +351,7 @@ export class Store {
                     instance._streamController?.abort(); // Abort previous iteration if any
                     const controller = new AbortController();
                     instance._streamController = controller;
+                    instance._state = 'pending'; // Mark as pending while stream emits
 
                     // IIAFE to handle the async iteration
                     (async () => {
@@ -354,6 +397,7 @@ export class Store {
                     instance._streamController?.abort(); // Abort previous subscription if any
                     const controller = new AbortController();
                     instance._streamController = controller;
+                    instance._state = 'pending'; // Mark as pending while observable emits
 
                     // Assume a simple Observable-like structure with subscribe returning an unsubscribe function or object
                     const subscription = (result as any).subscribe({
@@ -396,6 +440,7 @@ export class Store {
                      // Cast result to avoid TS errors, as we've excluded other known object types
                      newPromise = Promise.resolve(result as Promise<T>);
                      instance._promise = newPromise;
+                     instance._state = 'pending'; // Mark as pending while thenable resolves
                      newPromise.then(value => {
                          if (instance._promise === newPromise) this.updateAtomState(instance, value, undefined, undefined);
                      }).catch(error => {
@@ -416,12 +461,14 @@ export class Store {
 
             // Update state only if it's a synchronous result (newValue is set and not handled by async/stream/thenable)
             if (newValue !== undefined && newPromise === undefined && instance._streamController === undefined) {
-                 this.updateAtomState(instance, newValue, undefined, undefined);
+                 // Update state directly for sync results
+                 this.updateAtomState(instance, newValue, undefined, undefined); // Sets state to 'valid'
             }
 
         } catch (error) {
             newError = error;
-            this.updateAtomState(instance, undefined, undefined, newError);
+            // Update state to 'error'
+            this.updateAtomState(instance, undefined, undefined, newError); // Sets state to 'error'
         } finally {
             this.currentlyBuilding.delete(instance._id);
             this.buildStack.pop();
@@ -434,11 +481,25 @@ export class Store {
         const promiseChanged = instance._promise !== promise;
         const errorChanged = instance._error !== error;
 
+        // Determine the new state based on the outcome
+        let newState: AtomState = 'idle'; // Default, should be overwritten
+        if (error !== undefined) {
+            newState = 'error';
+        } else if (promise !== undefined) {
+            newState = 'pending'; // Still pending if a promise is involved (though updateAtomState is called on resolution/rejection)
+        } else if (value !== undefined) {
+            newState = 'valid';
+        }
+        // TODO: Handle stream completion state?
+
+        const stateChanged = instance._state !== newState;
+
         instance._value = value;
         instance._promise = promise;
         instance._error = error;
+        instance._state = newState; // Set the new state
 
-        if (valueChanged || promiseChanged || errorChanged) {
+        if (valueChanged || promiseChanged || errorChanged || stateChanged) { // Include state change in notification check
              // Only notify if state actually changed
             this.notifySubscribers(instance);
             // Only propagate if value changed (or maybe error status changed?)
@@ -455,6 +516,7 @@ export class Store {
          instance._value = undefined;
          instance._promise = undefined;
          instance._error = undefined;
+         instance._state = 'dirty'; // Set state to dirty
          // Rebuild dependents immediately? Or lazily on next get? Let's try lazy for now.
          this.propagateInvalidation(instance);
          // Notify subscribers that the value might be stale (or trigger rebuild?)
@@ -495,13 +557,35 @@ export class Store {
          const noDependents = !instance._dependents || instance._dependents.size === 0;
 
          if (noSubscribers && noDependents) {
-              console.log(`Tearing down atom ${String(instance._id)}`);
-              // Cancel ongoing streams/async operations
+              const instanceId = instance._id;
+              console.log(`Tearing down atom ${String(instanceId)}`);
+
+              // 1. Cancel ongoing streams/async operations
               instance._streamController?.abort();
               instance._streamController = undefined;
               // TODO: Cancel promises? More complex.
-              // TODO: Remove from caches? (atomCache, familyCache) - needs careful handling for families
-              this.clearDependencies(instance); // Clean up dependency links
+
+              // 2. Clean up dependency links
+              this.clearDependencies(instance);
+
+              // 3. Remove from global atom cache
+              this.atomCache.delete(instanceId);
+
+              // 4. Remove from family cache if applicable
+              if (instance._familyTemplateId && instance._lastParam !== undefined) {
+                  const familyId = instance._familyTemplateId;
+                  const paramKey = JSON.stringify(instance._lastParam);
+                  const familyInstances = this.familyCache.get(familyId);
+                  if (familyInstances) {
+                      familyInstances.delete(paramKey);
+                      console.log(`Removed instance ${String(instanceId)} (param: ${paramKey}) from family ${String(familyId)} cache.`);
+                      // If the family map is now empty, remove the family entry itself
+                      if (familyInstances.size === 0) {
+                          this.familyCache.delete(familyId);
+                          console.log(`Removed empty family cache for ${String(familyId)}.`);
+                      }
+                  }
+              }
          }
     }
 
@@ -522,14 +606,8 @@ export class Store {
     private propagateChanges(changedAtom: Atom<any>): void {
         // When an atom's value changes, its dependents might need recalculating.
         changedAtom._dependents?.forEach((dependent: Atom<any>) => {
-            // Invalidate dependent - it will rebuild on next access or if subscribed
+            // Invalidate dependent - it will rebuild lazily on next access
             this.invalidateAtom(dependent);
-            // If the dependent has active subscribers, trigger rebuild immediately?
-            // Or rely on UI layer calling get again? Let's try immediate rebuild if subscribed.
-            if (dependent._subscribers && dependent._subscribers.size > 0) {
-                 console.log(`Rebuilding subscribed dependent: ${String(dependent._id)}`);
-                 this.buildAtom(dependent);
-            }
         });
     }
 

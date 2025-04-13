@@ -20,12 +20,30 @@ export interface AtomContext {
  * an async function, a function returning a stream (Observable), 
  * or a model definition.
  */
+/**
+ * Represents the setter function for a writable computed atom.
+ */
+export type Setter = <T>(atom: Atom<T>, value: T | ((prev: T) => T)) => void;
+
+/**
+ * Represents the definition for a writable computed atom.
+ */
+export interface WritableComputedAtomDefinition<T> {
+  get: ((get: Getter) => T) | ((context: AtomContext) => T | Promise<T> | AsyncIterable<T>);
+  set: (context: { get: Getter; set: Setter }, newValue: T) => void; // Context includes get and set
+}
+
+
 export type AtomInitializer<T> =
   | T
-  // Note: Parameterized functions are now handled by AtomFamilyTemplate
+  // Read-only computed
   | ((get: Getter) => T)
+  // Async/Stream/Complex Sync computed (read-only by default)
   | ((context: AtomContext) => T | Promise<T> | AsyncIterable<T> /* | Observable<T> */)
-  | AtomModelDefinition<T, any>;
+  // Model-like
+  | AtomModelDefinition<T, any>
+  // Writable computed
+  | WritableComputedAtomDefinition<T>;
 
 /**
  * Represents the definition for a model-like atom with state and actions.
@@ -38,6 +56,8 @@ export interface AtomModelDefinition<TState, TActions extends Record<string, (..
 /**
  * Represents the core state unit.
  */
+export type AtomState = 'idle' | 'building' | 'valid' | 'error' | 'pending' | 'dirty';
+
 export interface Atom<T = unknown> {
   readonly _id: symbol; // Unique identifier
   readonly _init: AtomInitializer<T>;
@@ -51,7 +71,9 @@ export interface Atom<T = unknown> {
   _error?: unknown; // Error from async atom
   _streamController?: AbortController; // Controller for streams/async iterables
   _actionsApi?: any; // Cached actions API for model-like atoms
-  _lastParam?: any; // Last parameter used for family instance
+  _lastParam?: any; // Last parameter used for family instance (if applicable)
+  _familyTemplateId?: symbol; // ID of the family template this instance belongs to (if applicable)
+  _state?: AtomState; // Current state of the atom instance
 }
 
 /**

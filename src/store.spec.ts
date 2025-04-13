@@ -148,10 +148,132 @@ describe('Store', () => {
     expect(() => store.get(errorAtom)).toThrow('Async failed');
   });
 
+  it('should handle writable computed atoms', () => {
+    const sourceAtom = atom(10);
+    const writableComputed = atom<number>({
+      get: (get) => get(sourceAtom) * 2,
+      set: ({ set }, newValue) => {
+        // Assume setting the computed atom updates the source atom divided by 2
+        set(sourceAtom, newValue / 2);
+      }
+    });
+
+    // Initial get
+    expect(store.get(writableComputed)).toBe(20);
+
+    // Set the computed atom
+    store.set(writableComputed, 50);
+
+    // Check if computed atom reflects the change (it should recompute based on source)
+    expect(store.get(writableComputed)).toBe(50); // Setter should have updated source to 25, getter computes 25*2=50
+
+    // Check if the source atom was updated by the setter
+    expect(store.get(sourceAtom)).toBe(25);
+
+    // Check subscription on computed
+    const listener = vi.fn();
+    const unsubscribe = store.on(writableComputed, listener);
+    expect(listener).toHaveBeenCalledTimes(1); // Initial value
+    expect(listener).toHaveBeenCalledWith(50, undefined);
+
+    // Update source directly
+    store.set(sourceAtom, 30);
+    expect(store.get(writableComputed)).toBe(60);
+    expect(listener).toHaveBeenCalledTimes(2); // Notification due to dependency change
+    expect(listener).toHaveBeenLastCalledWith(60, undefined);
+
+    unsubscribe();
+  });
+
+  it('should manage atom state transitions correctly', () => {
+    const staticAtom = atom(1);
+    const computedAtom = atom(get => get(staticAtom) + 1);
+    const storeInternal = store as any;
+
+    // Initial state should be 'idle' before first get
+    expect(storeInternal.atomCache.get(staticAtom._id)?._state).toBeUndefined(); // Not in cache yet
+    expect(storeInternal.atomCache.get(computedAtom._id)?._state).toBeUndefined();
+
+    // Get static atom
+    store.get(staticAtom);
+    expect(storeInternal.atomCache.get(staticAtom._id)?._state).toBe('valid');
+
+    // Get computed atom (triggers build)
+    store.get(computedAtom);
+    expect(storeInternal.atomCache.get(computedAtom._id)?._state).toBe('valid');
+    expect(storeInternal.atomCache.get(staticAtom._id)?._state).toBe('valid'); // Dependency should also be valid
+
+    // Invalidate computed atom
+    storeInternal.invalidateAtom(computedAtom);
+    expect(storeInternal.atomCache.get(computedAtom._id)?._state).toBe('dirty');
+    expect(storeInternal.atomCache.get(staticAtom._id)?._state).toBe('valid'); // Dependency state shouldn't change yet
+
+    // Get computed atom again (triggers rebuild)
+    expect(store.get(computedAtom)).toBe(2);
+    expect(storeInternal.atomCache.get(computedAtom._id)?._state).toBe('valid');
+
+    // Invalidate static atom (should invalidate dependent computed atom)
+    storeInternal.invalidateAtom(staticAtom);
+    expect(storeInternal.atomCache.get(staticAtom._id)?._state).toBe('dirty');
+    expect(storeInternal.atomCache.get(computedAtom._id)?._state).toBe('dirty'); // Should become dirty due to dependency
+
+    // Get static atom (rebuilds)
+    expect(store.get(staticAtom)).toBe(1);
+    expect(storeInternal.atomCache.get(staticAtom._id)?._state).toBe('valid');
+    expect(storeInternal.atomCache.get(computedAtom._id)?._state).toBe('dirty'); // Computed remains dirty until accessed
+
+    // Get computed atom (rebuilds)
+    expect(store.get(computedAtom)).toBe(2);
+    expect(storeInternal.atomCache.get(computedAtom._id)?._state).toBe('valid');
+  });
+
   // TODO: Add tests for model-like atoms with actions
   // TODO: Add tests for family atoms
   // TODO: Add tests for stream atoms
   // TODO: Add tests for dependency tracking and invalidation
-  // TODO: Add tests for teardown logic
+  it('should teardown atom when last subscriber unsubscribes', () => {
+    const countAtom = atom(0);
+    const listener1 = vi.fn();
+    const listener2 = vi.fn();
+
+    // Access internal cache for testing (use with caution)
+    const storeInternal = store as any;
+    const atomId = countAtom._id;
+
+    // Initial get to ensure atom is in cache
+    store.get(countAtom);
+    expect(storeInternal.atomCache.has(atomId)).toBe(true);
+
+    const unsubscribe1 = store.on(countAtom, listener1);
+    const unsubscribe2 = store.on(countAtom, listener2);
+
+    store.set(countAtom, 1);
+    expect(listener1).toHaveBeenCalledTimes(2); // Initial + set
+    expect(listener2).toHaveBeenCalledTimes(2); // Initial + set
+
+    unsubscribe1();
+    store.set(countAtom, 2);
+    expect(listener1).toHaveBeenCalledTimes(2);
+    expect(listener2).toHaveBeenCalledTimes(3); // Still subscribed
+
+    // Teardown should happen here
+    unsubscribe2();
+    expect(storeInternal.atomCache.has(atomId)).toBe(false); // Check cache removal
+
+    // Setting after teardown should not throw, but atom will be rebuilt if accessed again
+    store.set(countAtom, 3);
+
+    // Re-subscribe, should trigger rebuild and get initial value (which is now 3)
+    const listener3 = vi.fn();
+    store.on(countAtom, listener3);
+    expect(storeInternal.atomCache.has(atomId)).toBe(true); // Back in cache
+    expect(listener3).toHaveBeenCalledTimes(1);
+    expect(listener3).toHaveBeenCalledWith(3, undefined);
+    expect(store.get(countAtom)).toBe(3);
+
+  });
+
+  // TODO: Add tests for teardown logic with dependents
+  // TODO: Add tests for teardown logic for family instances
   // TODO: Add tests for circular dependencies
 });
