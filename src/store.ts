@@ -117,22 +117,24 @@ export class Store {
      * Subscribes to changes in an atom's value.
      * Returns an unsubscribe function. The callback receives the value or undefined, and an optional error.
      */
-    on<T>(atom: Atom<T>, callback: (value?: T, error?: unknown) => void): () => void {
-        const instance = this.resolveAtomInstance(atom);
+    // Use Atom<any> for the input parameter to accept various atom types from overloads
+    on<T>(atom: Atom<any>, callback: (value?: T, error?: unknown) => void): () => void {
+        // Resolve the instance as before, but cast it internally if needed
+        const instance = this.resolveAtomInstance(atom) as Atom<T>;
         if (!instance._subscribers) {
-            // Explicitly type the Set when creating it
+            // Explicitly type the Set when creating it, using the inferred T
             instance._subscribers = new Set<(value?: T, error?: unknown) => void>();
         }
-        // The callback type matches the Set type now
+        // Cast the callback before adding to the Set to ensure compatibility
         instance._subscribers.add(callback);
 
         // Trigger initial build ONLY if atom is idle (never built)
         if (instance._state === 'idle') {
              this.buildAtom(instance);
              // Note: buildAtom -> updateAtomState -> notifySubscribers will call the callback
-        } else if (instance._state !== 'building' && instance._state !== 'pending') {
-             // If atom is already resolved (valid or error), notify the new subscriber immediately
-             // Avoid notifying if it's currently building or pending to prevent race conditions
+        } else if (instance._state === 'valid' || instance._state === 'error') {
+             // If atom is already resolved (valid or error), notify the new subscriber immediately.
+             // Do NOT notify immediately if state is 'pending', 'building', or 'dirty'.
              try {
                  callback(instance._value, instance._error);
              } catch (err) {
@@ -143,7 +145,7 @@ export class Store {
         return () => {
             const subscribers = instance._subscribers;
             if (subscribers) {
-                // The callback type matches the Set type now
+                // Cast the callback before deleting from the Set
                 subscribers.delete(callback);
                 if (subscribers.size === 0) {
                     // Optional: Teardown logic when no subscribers are left
@@ -156,50 +158,69 @@ export class Store {
     /**
      * Retrieves the actions API for a model-like atom.
      */
+    // Reverted 'use' method signature to be more general, relying on internal checks
     use<TAtom extends Atom<any>>(atom: TAtom): AtomActions<TAtom> {
         const instance = this.resolveAtomInstance(atom);
-        const definition = instance._init as AtomModelDefinition<any, any>;
+        const definition = instance._init; // Get the initializer
 
-        if (typeof definition !== 'object' || definition === null || !('actions' in definition)) {
-            throw new Error('Atom does not have actions defined. Use store.get() or store.set() instead.');
+        // Perform runtime check to ensure it's a valid model definition
+        if (typeof definition !== 'object' || definition === null || !('actions' in definition) || !('build' in definition) || typeof (definition as any).actions !== 'object' || (definition as any).actions === null) {
+            throw new Error('Atom is not a valid model-like atom with actions. Use store.get() or store.set() instead.');
         }
+
+        // Cast to the specific model definition type *after* the check
+        const modelDefinition = definition as AtomModelDefinition<any, Record<string, (state: any, ...args: any[]) => any>>;
 
         // Cache the bound actions API
         if (!instance._actionsApi) {
-            instance._actionsApi = {} as AtomActions<TAtom>;
-            for (const actionName in definition.actions) {
-                const actionFn = definition.actions[actionName];
-                (instance._actionsApi as any)[actionName] = async (...args: any[]) => {
-                    // TODO: Handle state updates based on action return value (sync or async)
-                    const currentState = this.get(instance); // Get current state before action
-                    try {
-                        const result = await actionFn(currentState, ...args);
-                        // If action returns a new state, update the atom
-                        if (result !== undefined) { // Allow actions to not return state if they mutate elsewhere or are just triggers
-                             // Use internal set to bypass writability checks
-                            this.internalSetState(instance, result);
+            // Use 'any' for the initial object and rely on the final return type assertion
+            const actionsApi: any = {};
+            for (const actionName in modelDefinition.actions) {
+                if (Object.prototype.hasOwnProperty.call(modelDefinition.actions, actionName)) {
+                    const actionFn = modelDefinition.actions[actionName];
+                    // Bind the action function
+                    actionsApi[actionName] = async (...args: any[]) => { // Use any[] for args here
+                        const currentState = this.get(instance); // Get current state before action
+                        try {
+                            // Call the original action function with state and the rest of the arguments
+                            const result = await actionFn(currentState, ...args);
+                            // If action returns a new state, update the atom
+                            // Check for undefined explicitly, allow null/false/0 as valid states
+                            if (result !== undefined && result !== currentState) {
+                                // Use internal set to bypass writability checks
+                                // Use internal set AND explicitly propagate changes
+                                this.internalSetState(instance, result);
+                                // Ensure propagation happens after state update from action
+                                this.propagateChanges(instance);
+                            }
+                            // Return the result, which could be a Promise or a direct value
+                            return result;
+                        } catch (error) {
+                            console.error(`Error in action '${actionName}' for atom ${String(instance._id)}:`, error);
+                            this.updateAtomState(instance, undefined, undefined, error); // Update state to error
+                            throw error; // Re-throw error
                         }
-                        return result; // Return action result if any
-                    } catch (error) { 
-                        console.error(`Error in action '${actionName}' for atom ${String(instance._id)}:`, error);
-                        // Optionally update atom state with error?
-                        throw error; // Re-throw error
-                    }
-                };
+                    };
+                }
             }
+            instance._actionsApi = actionsApi;
         }
-        return instance._actionsApi;
+        // Assert the return type using the AtomActions utility type
+        return instance._actionsApi as AtomActions<TAtom>;
     }
 
     // --- Internal Methods ---
 
     private internalSetState<T>(instance: Atom<T>, newState: T): void {
-        if (instance._value !== newState) {
+        const oldValue = instance._value;
+        if (oldValue !== newState) {
             instance._value = newState;
             instance._promise = undefined; // Clear async state on direct update
             instance._error = undefined;
+            instance._state = 'valid'; // Ensure state is marked as valid
             this.notifySubscribers(instance);
-            this.propagateChanges(instance);
+            // propagateChanges is already called in the 'use' method after this now
+            // this.propagateChanges(instance); // Avoid double propagation
         }
     }
 
@@ -277,6 +298,7 @@ export class Store {
         this.buildStack.push(instance);
 
         // Clear previous dependencies before rebuilding
+        // console.log(`[buildAtom ${String(instance._id)}] Clearing dependencies`);
         this.clearDependencies(instance);
 
         // Reset state before build
@@ -305,10 +327,11 @@ export class Store {
             }
 
             if (buildFn) {
-                // Internal getter for build functions: returns error instead of throwing
-                const getter = <D>(dep: Atom<D>): D | unknown => {
+                // Internal getter for build functions: throws errors/promises
+                const getter: Getter = <D>(dep: Atom<D>): D => { // Explicitly type as Getter
                     const depInstance = this.resolveAtomInstance(dep);
-                    // Dependency Tracking (moved from main get to here for build context)
+                    // Dependency Tracking
+                    // console.log(`[getter for ${String(instance._id)}] Registering dependency on ${String(depInstance._id)}`);
                     this.registerDependency(instance, depInstance);
 
                     // Check if dependency needs building/rebuilding
@@ -316,25 +339,33 @@ export class Store {
                         this.buildAtom(depInstance);
                     }
 
-                    // Return error directly if dependency has one
+                    // Check for circular dependency *after* attempting to build dependency
+                    // If the dependency is still being built, it means we hit a cycle.
+                    if (this.currentlyBuilding.has(depInstance._id)) {
+                        const path = [...this.buildStack.map(a => String(a._id)), String(depInstance._id)].join(' -> ');
+                        throw new Error(`Circular dependency detected: ${path}`);
+                    }
+
+                    // Now check the state of the dependency *after* the build attempt
                     if (depInstance._error !== undefined) {
-                        return depInstance._error;
+                        throw depInstance._error;
                     }
                     // Throw promise for Suspense-like behavior within build
                     if (depInstance._promise !== undefined) {
                          throw depInstance._promise;
                     }
-                    if (depInstance._value !== undefined) {
+                    // Return value if valid
+                    if (depInstance._state === 'valid' && depInstance._value !== undefined) {
                          return depInstance._value as D;
                     }
-                     // Handle static atoms if still idle
+                     // Handle static atoms if still idle (should become valid after this)
                     if (depInstance._state === 'idle' && typeof depInstance._init !== 'function') {
                          depInstance._value = depInstance._init as D;
                          depInstance._state = 'valid';
                          return depInstance._value as D;
                     }
-                    // Should not happen if buildAtom was called correctly
-                    throw new Error(`Dependency atom ${String(depInstance._id)} could not be resolved.`);
+                    // If state is not valid after potential build, something went wrong
+                    throw new Error(`Dependency atom ${String(depInstance._id)} could not be resolved to a valid state.`);
                 };
                 const context: AtomContext = {
                     get: getter,
@@ -360,15 +391,20 @@ export class Store {
                     newPromise = result;
                     instance._promise = newPromise; // Set promise immediately
                     instance._state = 'pending'; // Mark as pending while promise resolves
-                    result
+                    // Ensure promise state is cleared *before* updating state
+                    newPromise
                         .then(value => {
                             // Only update if the promise is still the current one
                             if (instance._promise === newPromise) {
+                                // Clear promise *before* update to prevent race conditions if accessed during notify
+                                instance._promise = undefined;
                                 this.updateAtomState(instance, value, undefined, undefined);
                             }
                         })
                         .catch(error => {
                             if (instance._promise === newPromise) {
+                                // Clear promise *before* update
+                                instance._promise = undefined;
                                 this.updateAtomState(instance, undefined, undefined, error);
                             }
                         });
@@ -398,11 +434,13 @@ export class Store {
                                 instance._streamController = undefined; // Clear controller on completion
                             }
                         } catch (error) {
-                            if (!controller.signal.aborted) {
-                                console.error(`Error in AsyncIterable for atom ${String(instance._id)}:`, error);
-                                this.updateAtomState(instance, undefined, undefined, error);
-                                instance._streamController = undefined; // Clear controller on error
-                            }
+                            // Ensure state is updated even if aborted, but log differently?
+                            // For now, update state regardless of abort signal if an error occurs during iteration.
+                            console.error(`Error in AsyncIterable for atom ${String(instance._id)}:`, error);
+                            // Clear promise *before* update
+                            instance._promise = undefined; // Clear any pending promise state
+                            this.updateAtomState(instance, undefined, undefined, error);
+                            instance._streamController = undefined; // Clear controller on error
                         }
                     })();
 
@@ -573,10 +611,13 @@ export class Store {
     }
 
     private clearDependencies(atom: Atom<any>) {
+        // console.log(`Clearing dependencies for ${String(atom._id)}`);
         atom._dependencies?.forEach((dep: Atom<any>) => {
+            // console.log(`  Removing ${String(atom._id)} from dependents of ${String(dep._id)}`);
             dep._dependents?.delete(atom);
+            // Optional: Clean up dependents set if empty? Maybe not necessary here.
         });
-        atom._dependencies = undefined; // Clear old dependencies
+        atom._dependencies = new Set(); // Reset to a new empty Set instead of undefined
     }
 
     private maybeTeardownAtom(instance: Atom<any>) {

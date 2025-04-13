@@ -1,7 +1,7 @@
 /**
  * Represents a function to get the value of another atom within a computed atom or model build.
  */
-export type Getter = <T>(atom: Atom<T>) => T | unknown; // Allow returning unknown for errors in build context
+export type Getter = <T>(atom: Atom<T>) => T; // Return the specific type T, throw errors/promises
 
 /**
  * Represents the context passed to async/computed atom initializers.
@@ -101,7 +101,12 @@ export function isFamilyAtomTemplate<T, P>(
 /**
  * Represents the actions extracted from a model-like atom.
  */
+// Utility type to get all parameters except the first one
+export type RestParameters<T extends (...args: any) => any> =
+  T extends (first: any, ...rest: infer R) => any ? R : never;
+
+// Simpler AtomActions definition - might lose some specific type safety but aims to avoid 'never'
 export type AtomActions<TAtom extends Atom<any>> =
   TAtom['_init'] extends AtomModelDefinition<any, infer TActions>
-    ? { [K in keyof TActions]: (...args: Parameters<TActions[K]>[1]) => ReturnType<TActions[K]> }
+    ? TActions // Directly return the inferred actions type
     : never;
