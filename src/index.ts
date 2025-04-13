@@ -1,4 +1,4 @@
-export { atom, atomFamily } from './atom.js';
+export { atom } from './atom.js';
 export { Store, getDefaultStore } from './store.js';
 export type {
     Atom,

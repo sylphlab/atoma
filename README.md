@@ -111,7 +111,7 @@ try {
 *   **Unified API**: A single `atom()` function creates all types of state (sync, async, computed, stream, model, family).
 *   **Minimalist Surface**: Only `atom()` and `store()` are needed to get started.
 *   **Framework-Agnostic**: Designed to work in any JavaScript environment. UI integrations (e.g., for React) can be built on top.
-*   **Implicit Families**: Parameterized atoms are automatically treated as families, simplifying creation.
+*   **Implicit Families**: Atoms created with a function that accepts parameters (`atom((param) => ...)` or `atom({ build: (param) => ..., ... })`) are automatically treated as families, simplifying parameterized state management.
 *   **Type-Safe**: Written in TypeScript with a focus on inference and type safety.
 *   **Fine-Grained Updates**: Only components subscribed to changed atoms are notified.
 

@@ -18,7 +18,7 @@
   "scripts": {
     "dev": "tsup src/index.ts --format esm,cjs --watch --dts",
     "build": "tsup src/index.ts --format esm,cjs --dts --clean --minify",
-    "test": "vitest",
+    "test": "vitest run",
     "coverage": "vitest run --coverage"
   },
   "repository": {

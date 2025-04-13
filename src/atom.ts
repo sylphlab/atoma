@@ -1,52 +1,101 @@
 import {
-    Atom, AtomInitializer, AtomFamilyTemplate, isFamilyAtomTemplate,
-    AtomModelDefinition, WritableComputedAtomDefinition, Getter, AtomContext
+    Atom, AtomInitializer, FunctionAtomInitializer, FamilyInitializerFunction, // Corrected import name
+    AtomModelDefinition, WritableComputedAtomDefinition, Getter, AtomContext,
+    FamilyInvoker, FamilyMemberAtomDescriptor // Use Descriptor type
 } from './types.js';
-import { getDefaultStore } from './store.js';
-
+// getDefaultStore import removed as it's not used in this file anymore
 // --- Atom Function Overloads ---
 
-// Overload 1: Model-like atoms
+// --- Atom Function Overloads ---
+// Order is important for correct type inference
+
+// Order is crucial for correct type inference. More specific signatures first.
+
+// 1. Model-like atoms (non-family) - Most specific object structure
 export function atom<TState, TActions extends Record<string, (state: TState, ...args: any[]) => any>>(
     initializer: AtomModelDefinition<TState, TActions>
-): Atom<TState> & { _init: AtomModelDefinition<TState, TActions> }; // Return more specific type
+): Atom<TState> & { _init: AtomModelDefinition<TState, TActions> };
 
-// Overload 2: Writable computed atoms
+// 2. Writable computed atoms (non-family) - Specific object structure
 export function atom<T>(
     initializer: WritableComputedAtomDefinition<T>
-): Atom<T> & { _init: WritableComputedAtomDefinition<T> }; // Return more specific type
+): Atom<T> & { _init: WritableComputedAtomDefinition<T> };
 
-// Overload 3: Read-only computed atoms (getter function)
+// 3. Read-only computed atoms (getter function - non-family, length 1) - Specific function signature
 export function atom<T>(
     initializer: (get: Getter) => T
-): Atom<T> & { _init: (get: Getter) => T }; // Return specific function type
+): Atom<T> & { _init: (get: Getter) => T };
 
-// Overload 4: Read-only computed atoms (context function - sync/async/stream)
+// 4. Read-only computed atoms (context function - non-family, length 1) - Specific function signature
 export function atom<T>(
     initializer: (context: AtomContext) => T | Promise<T> | AsyncIterable<T> /* | Observable<T> */
-): Atom<T> & { _init: (context: AtomContext) => T | Promise<T> | AsyncIterable<T> }; // Return specific function type
+): Atom<T> & { _init: (context: AtomContext) => T | Promise<T> | AsyncIterable<T> };
 
-// Overload 5: Simple static value atoms (must come after functions to avoid ambiguity)
+// 5. Family Atom Template (function with context + AT LEAST one parameter) - Function with length > 1
+export function atom<T, P extends [any, ...any[]]>( // Enforce P has at least one element
+    initializer: FamilyInitializerFunction<T, P>
+): FamilyInvoker<T, P>;
+
+// 6. Simple static value atoms (must come last)
 export function atom<T>(
-    initializer: T extends Function ? never : T // Prevent functions matching this overload
-): Atom<T> & { _init: T }; // Return specific value type
+    initializer: T extends Function ? never : T // Prevent functions matching this overload if possible
+): Atom<T> & { _init: T };
 
 // --- Atom Function Implementation ---
 /**
  * Creates a new atom, the core state unit.
  */
-export function atom<T>(
-    initializer: AtomInitializer<T>
-): Atom<T> { // Implementation signature remains general
-
+// Implementation
+export function atom(initializer: any): any { // Return type 'any' for simplicity in implementation
     const id = Symbol('atom');
 
-    // Create the Atom object directly with readonly properties
-    // We cast the return type to Atom<T> as the implementation covers all cases,
-    // but specific overload signatures provide better type inference for callers.
-    const newAtom: Atom<T> = {
+    // Runtime check based on function arity to distinguish family template
+    if (typeof initializer === 'function' && initializer.length > 1) {
+        // It's a family initializer function. Return the invoker.
+        const familyInitializerFn = initializer as FamilyInitializerFunction<any, [any, ...any[]]>;
+        const templateId = id; // Use the generated ID for the template concept
+
+        const invoker: FamilyInvoker<any, any[]> = (...params: any[]) => {
+            // Descriptor now includes the initializer function itself
+            const descriptor: FamilyMemberAtomDescriptor<any, any[]> = {
+                _templateAtomId: templateId,
+                _params: params,
+                _init: familyInitializerFn, // Pass the initializer
+                _isFamilyMemberDescriptor: true,
+            };
+            return descriptor;
+        };
+        (invoker as any)._templateId = templateId; // Keep for debugging
+        return invoker;
+    }
+
+    // Determine _initType hint for non-family atoms
+    let initType: 'static' | 'getter' | 'context' | 'model' | 'writable' = 'static';
+    if (typeof initializer === 'function') {
+        // Crude check based on function signature (less reliable than overloads)
+        // This hint helps buildAtom decide how to call the function.
+        const funcStr = initializer.toString();
+        if (initializer.length === 1 && (funcStr.includes('get(') || funcStr.match(/\(\s*\{?\s*get\s*\}?\s*\)/))) {
+             initType = 'getter';
+        } else if (initializer.length === 1) {
+             initType = 'context'; // Default for length 1 function
+        } else if (initializer.length === 0) {
+             initType = 'context'; // Assume context for 0-arg functions (like model build)
+        }
+        // Note: Family functions (length > 1) are handled above.
+    } else if (typeof initializer === 'object' && initializer !== null) {
+        if ('actions' in initializer && 'build' in initializer) {
+            initType = 'model';
+        } else if ('get' in initializer && 'set' in initializer) {
+            initType = 'writable';
+        }
+    }
+
+
+    const newAtom: Atom<any> & { _initType?: typeof initType } = {
         _id: id,
         _init: initializer,
+        _initType: initType, // Store hint for buildAtom
         // Initialize internal state properties
         _subscribers: undefined,
         _dependents: undefined,
@@ -57,29 +106,7 @@ export function atom<T>(
         _streamController: undefined,
         _actionsApi: undefined,
         _lastParam: undefined, // Not used for non-family atoms
-        _state: 'idle', // Initialize state
+        _state: 'idle',
     };
-    return newAtom; // Return the general type, overloads handle external typing
-}
-
-/**
- * Creates a new atom family template.
- *
- * Example: `atomFamily((id: string) => atom(async () => fetchUser(id)))`
- */
-export function atomFamily<T, P>(
-    initializer: (param: P) => AtomInitializer<T>
-): AtomFamilyTemplate<T, P> {
-    const id = Symbol('family');
-
-    const familyTemplate: AtomFamilyTemplate<T, P> = {
-        _id: id,
-        _init: initializer,
-        _isFamilyTemplate: true,
-    };
-
-    // Note: Family templates don't hold state like individual atoms.
-    // The store manages instances derived from the template.
-
-    return familyTemplate;
+    return newAtom;
 }

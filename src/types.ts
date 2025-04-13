@@ -1,7 +1,7 @@
 /**
  * Represents a function to get the value of another atom within a computed atom or model build.
  */
-export type Getter = <T>(atom: Atom<T>) => T; // Return the specific type T, throw errors/promises
+export type Getter = <T>(atomOrDescriptor: Atom<T> | FamilyMemberAtomDescriptor<T>) => T; // Accept Atom or Descriptor
 
 /**
  * Represents the context passed to async/computed atom initializers.
@@ -34,21 +34,36 @@ export interface WritableComputedAtomDefinition<T> {
 }
 
 
+// Base type for initializers that are functions (excluding static values)
+export type FunctionAtomInitializer<T> =
+    // Read-only computed (getter only)
+    | ((get: Getter) => T)
+    // Async/Stream/Complex Sync computed (context only)
+    | ((context: AtomContext) => T | Promise<T> | AsyncIterable<T> /* | Observable<T> */)
+    // Model-like (build function can take get or context)
+    | AtomModelDefinition<T, any>
+    // Writable computed (get function can take get or context)
+    | WritableComputedAtomDefinition<T>;
+
+// Initializer function signature specifically for families.
+// It MUST take context as the first argument, followed by parameters,
+// and it MUST return another AtomInitializer (not the final value directly).
+// Enforce at least one parameter after context for families
+export type FamilyInitializerFunction<T, P extends [any, ...any[]]> =
+    (context: AtomContext, ...params: P) => AtomInitializer<T>;
+
+// Combined type for any atom initializer
 export type AtomInitializer<T> =
-  | T
-  // Read-only computed
-  | ((get: Getter) => T)
-  // Async/Stream/Complex Sync computed (read-only by default)
-  | ((context: AtomContext) => T | Promise<T> | AsyncIterable<T> /* | Observable<T> */)
-  // Model-like
-  | AtomModelDefinition<T, any>
-  // Writable computed
-  | WritableComputedAtomDefinition<T>;
+    | T // Static value
+    | FunctionAtomInitializer<T>; // Function-based (non-family)
+    // Note: Family initializers (FamilyInitializerFunction) are handled by a separate overload in atom()
+    // and are not part of the AtomInitializer union to prevent ambiguity with context-only functions.
 
 /**
  * Represents the definition for a model-like atom with state and actions.
  */
 export interface AtomModelDefinition<TState, TActions extends Record<string, (...args: any[]) => any>> {
+  // Build function for models CANNOT accept additional parameters (must be 0 or 1 arg)
   build: (() => TState) | ((get: Getter) => TState) | ((context: AtomContext) => TState | Promise<TState> | AsyncIterable<TState>);
   actions: TActions;
 }
@@ -61,7 +76,8 @@ export type AtomState = 'idle' | 'building' | 'valid' | 'error' | 'pending' | 'd
 export interface Atom<T = unknown> {
   readonly _id: symbol; // Unique identifier
   readonly _init: AtomInitializer<T>;
-  // _isFamily flag removed, handled by distinct types now
+  // _templateAtomId and _paramKey removed from public Atom interface.
+  // They exist only on the internal instances managed by the store.
   // Internal properties for store management
   _subscribers?: Set<(value?: T, error?: unknown) => void>; // Matches Store.on signature
   _dependents?: Set<Atom<any>>; // Atoms that depend on this one
@@ -71,33 +87,33 @@ export interface Atom<T = unknown> {
   _error?: unknown; // Error from async atom
   _streamController?: AbortController; // Controller for streams/async iterables
   _actionsApi?: any; // Cached actions API for model-like atoms
-  _lastParam?: any; // Last parameter used for family instance (if applicable)
-  _familyTemplateId?: symbol; // ID of the family template this instance belongs to (if applicable)
+  _lastParam?: any; // Actual parameter value used to create this instance (for internal use)
   _state?: AtomState; // Current state of the atom instance
 }
 
-/**
- * Represents a template for creating parameterized atoms (a family).
- * It's not an Atom instance itself, but a factory.
- */
-export interface AtomFamilyTemplate<T = unknown, P = any> {
-  readonly _id: symbol; // Unique identifier for the family template
-  // The initializer function that takes a parameter and returns an AtomInitializer
-  readonly _init: (param: P) => AtomInitializer<T>;
-  // Add a distinct property to help type guards, though structure differs now
-  readonly _isFamilyTemplate: true; // Distinct property for type guards
+// Represents the function returned by atom() when the initializer is for a family.
+// This function takes the parameter and returns a FamilyMemberAtom descriptor.
+export type FamilyInvoker<T, P extends any[]> = (...params: P) => FamilyMemberAtomDescriptor<T, P>;
+
+// Represents the descriptor object returned by a FamilyInvoker.
+export interface FamilyMemberAtomDescriptor<T = unknown, P extends any[] = any[]> {
+  readonly _templateAtomId: symbol; // ID of the *template* atom
+  readonly _params: P; // The specific parameters for this member
+  readonly _init: FamilyInitializerFunction<T, P extends [any, ...any[]] ? P : [any, ...any[]]>; // Match constraint
+  readonly _isFamilyMemberDescriptor: true; // Type guard property
+  // Add phantom type to satisfy Atom<T> usage in some places if needed, or adjust store methods
+  // readonly _phantomValue?: T;
 }
 
-/**
- * Type guard to check if an object is an AtomFamilyTemplate.
- */
-export function isFamilyAtomTemplate<T, P>(
-  template: unknown // Check against unknown as it might not be an Atom
-): template is AtomFamilyTemplate<T, P> {
-  // Check for the distinct property and the initializer function type
-  return typeof template === 'object' && template !== null && (template as any)._isFamilyTemplate === true && typeof (template as any)._init === 'function';
+/** Type guard for FamilyMemberAtom descriptors */
+export function isFamilyMemberDescriptor<T, P extends any[]>(
+  value: unknown
+): value is FamilyMemberAtomDescriptor<T, P> {
+  return typeof value === 'object' && value !== null && (value as any)._isFamilyMemberDescriptor === true;
 }
 
+// Adjust Atom interface slightly - _templateAtomId/_paramKey/_lastParam are only on *internal* instances, not descriptors.
+// Remove them from the public Atom interface.
 /**
  * Represents the actions extracted from a model-like atom.
  */
