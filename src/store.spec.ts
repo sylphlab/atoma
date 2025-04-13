@@ -273,6 +273,37 @@ describe('Store', () => {
 
   });
 
+  it('should allow computed atoms to catch and handle dependency errors', () => {
+    const errorSourceAtom = atom(() => {
+      throw new Error('Dependency Failed');
+    });
+
+    const errorHandlerAtom = atom(get => {
+      try {
+        // The internal getter used during build might return the error object
+        const valueOrError = get(errorSourceAtom);
+        if (valueOrError instanceof Error) {
+          // console.log('Caught error from dependency:', valueOrError.message);
+          return 'Handled Error: ' + valueOrError.message;
+        }
+        // This part should not be reached if the dependency throws
+        return 'Dependency OK';
+      } catch (e) {
+        // This catch block might catch errors thrown by the getter itself (e.g., Suspense promise)
+        // or if the internal getter logic changes back to throwing errors.
+        // console.error('Caught error via try-catch:', e);
+        return 'Handled Error via Catch';
+      }
+    });
+
+    // Get the error handler atom. It should execute its build function,
+    // catch the error from errorSourceAtom using the internal getter,
+    // and return the handled value.
+    expect(store.get(errorHandlerAtom)).toBe('Handled Error: Dependency Failed');
+
+    // Verify the source atom still reports the error if accessed directly
+    expect(() => store.get(errorSourceAtom)).toThrow('Dependency Failed');
+  });
   // TODO: Add tests for teardown logic with dependents
   // TODO: Add tests for teardown logic for family instances
   // TODO: Add tests for circular dependencies

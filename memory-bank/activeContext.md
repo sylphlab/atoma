@@ -1,12 +1,10 @@
 # Active Context
 
-**Current Focus**: Implementing Refined Error Propagation in `Store`.
-
+**Current Focus**: Writing comprehensive unit tests for all features.
 **Summary of Recent Actions**:
-- **Fixed Heap Overflow**: Identified and fixed a recursive loop in `store.ts`'s `propagateChanges` function. The function was immediately rebuilding subscribed dependents after invalidation, leading to potential infinite loops. Changed the logic to only invalidate, relying on lazy evaluation (rebuild on next `get`).
-- **Ran `npm test`**: Tests now pass successfully after the fix.
-- **Added `.gitignore`**: Created a standard `.gitignore` file for Node.js/TypeScript projects.
-
+- **Fixed Heap Overflow**: Resolved recursive loop in `store.ts`'s `propagateChanges`. Tests pass.
+- **Added `.gitignore`**: Created standard `.gitignore`.
+- **Refined Error Handling (Phase 1)**: Modified internal `getter` in `buildAtom` to return errors instead of throwing, allowing computed atoms to catch dependency errors. Updated `Getter` type. Added test case (`should allow computed atoms to catch and handle dependency errors`). All tests pass.
 **Previous Context (Pre-Fix)**:
 - Refactored Atom Families & Fixed Initial Tests.
 - Renamed project references to `@atoma/core`.
@@ -18,8 +16,6 @@
 - Encountered heap overflow during tests.
 
 **Next Steps**:
-1. Implement remaining `Store` logic:
-    - **Refined Error Propagation**: Improve how errors are handled and potentially stored/cleared within atoms and propagated to subscribers/dependents.
-2. Write/Fix comprehensive unit tests for all features (families, models, streams, writable computed, teardown, dirty checking/state transitions, error propagation, edge cases).
-3. Implement React hooks (optional).
-4. Documentation.
+1.  **Write/Fix Comprehensive Unit Tests**: Cover all features (families, models, streams, writable computed, teardown, dirty checking/state transitions, error propagation, edge cases). This is the current focus.
+2.  Implement React hooks (optional).
+3.  Documentation.

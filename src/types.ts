@@ -1,7 +1,7 @@
 /**
  * Represents a function to get the value of another atom within a computed atom or model build.
  */
-export type Getter = <T>(atom: Atom<T>) => T;
+export type Getter = <T>(atom: Atom<T>) => T | unknown; // Allow returning unknown for errors in build context
 
 /**
  * Represents the context passed to async/computed atom initializers.

@@ -305,9 +305,36 @@ export class Store {
             }
 
             if (buildFn) {
-                const getter: Getter = <D>(dep: Atom<D>) => { // Added type annotation
-                    // Note: Dependency registration happens in the `get` method itself
-                    return this.get(dep);
+                // Internal getter for build functions: returns error instead of throwing
+                const getter = <D>(dep: Atom<D>): D | unknown => {
+                    const depInstance = this.resolveAtomInstance(dep);
+                    // Dependency Tracking (moved from main get to here for build context)
+                    this.registerDependency(instance, depInstance);
+
+                    // Check if dependency needs building/rebuilding
+                    if (depInstance._state === 'idle' || depInstance._state === 'dirty') {
+                        this.buildAtom(depInstance);
+                    }
+
+                    // Return error directly if dependency has one
+                    if (depInstance._error !== undefined) {
+                        return depInstance._error;
+                    }
+                    // Throw promise for Suspense-like behavior within build
+                    if (depInstance._promise !== undefined) {
+                         throw depInstance._promise;
+                    }
+                    if (depInstance._value !== undefined) {
+                         return depInstance._value as D;
+                    }
+                     // Handle static atoms if still idle
+                    if (depInstance._state === 'idle' && typeof depInstance._init !== 'function') {
+                         depInstance._value = depInstance._init as D;
+                         depInstance._state = 'valid';
+                         return depInstance._value as D;
+                    }
+                    // Should not happen if buildAtom was called correctly
+                    throw new Error(`Dependency atom ${String(depInstance._id)} could not be resolved.`);
                 };
                 const context: AtomContext = {
                     get: getter,
@@ -321,7 +348,8 @@ export class Store {
                 let result: T | Promise<T> | AsyncIterable<T>;
                 if (buildFn.length === 1) {
                      // Assume it expects the getter directly (e.g., get => ...)
-                     result = buildFn(getter);
+                     // Pass the internal getter, which might return an error
+                     result = buildFn(getter); // No cast needed now
                 } else {
                      // Assume it expects the full context (e.g., context => ..., () => ..., async () => ...)
                      result = buildFn(context);
